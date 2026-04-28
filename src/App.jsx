@@ -3,6 +3,7 @@ import Navbar from './components/shared/Navbar';
 import BeamPage from './pages/BeamPage';
 import TrussPage from './pages/TrussPage';
 import SummaryPage from './pages/SummaryPage';
+import Section3DPage from './pages/Section3DPage';
 
 export default function App() {
   const { activeTab } = useStore();
@@ -14,6 +15,7 @@ export default function App() {
         {activeTab === 'beam' && <BeamPage />}
         {activeTab === 'truss' && <TrussPage />}
         {activeTab === 'summary' && <SummaryPage />}
+        {activeTab === 'section3d' && <Section3DPage />}
       </main>
     </div>
   );
