@@ -10,8 +10,12 @@ const defaultBeam = {
   ],
   pointLoads: [{ id: 1, x: 5, magnitude: -20000 }],
   udls: [],
+  triangularLoads: [],
+  customLoads: [],
   moments: [],
+  hinges: [],
   ildPoint: 5,
+  ildType: 'shear', // 'shear' | 'moment'
 };
 
 const defaultTruss = {
@@ -19,9 +23,14 @@ const defaultTruss = {
   span: 12,
   height: 3,
   bays: 4,
+  E: 200e9,
+  A: 0.01,
   nodes: [],
   members: [],
   loads: [],
+  pinNodeId: null,
+  rollerNodeId: null,
+  ildMemberId: null,
   results: null,
 };
 

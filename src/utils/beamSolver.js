@@ -1,65 +1,191 @@
 /**
- * Beam solver using Macaulay's method for simply-supported & multi-support beams.
- * For statically indeterminate beams (more than 2 supports) we use the
- * Three-Moment Equation (Clapeyron) approach extended to n spans.
+ * Beam solver: Macaulay / numerical integration approach.
+ * Supports: UDL, point loads, triangular loads, custom function loads,
+ *           applied moments, internal hinges.
  */
 
-function macaulayStep(x, a) {
-  return x >= a ? x - a : 0;
+// ---------------------------------------------------------------------------
+// Distributed load helpers
+// ---------------------------------------------------------------------------
+
+/** Cumulative shear (integral of w from 0 to x) for a triangular load [x1,x2,w1,w2] */
+function triShearAt(x, x1, x2, w1, w2) {
+  if (x <= x1) return 0;
+  const dx = x2 - x1;
+  if (x >= x2) return (w1 + w2) / 2 * dx;
+  const t = x - x1;
+  return w1 * t + (w2 - w1) * t * t / (2 * dx);
 }
 
-/** Solve a simply-supported beam (2 supports: pin + roller) */
-function solveDeterminate(span, supports, pointLoads, udls, moments) {
-  const pin = supports.find((s) => s.type === 'pin' || s.type === 'fixed') || supports[0];
-  const roller = supports.find((s) => s.id !== pin.id) || supports[1];
-  const a = Math.min(pin.x, roller.x);
-  const b = Math.max(pin.x, roller.x);
+/** Moment of triangular load about point 'a' (for reaction calculation) */
+function triMomentAbout(a, x1, x2, w1, w2) {
+  const dx = x2 - x1;
+  const totalForce = (w1 + w2) / 2 * dx;
+  let centroid;
+  if (Math.abs(w1 + w2) < 1e-12) {
+    centroid = (x1 + x2) / 2;
+  } else {
+    centroid = x1 + dx * (2 * w2 + w1) / (3 * (w1 + w2));
+  }
+  return totalForce * (centroid - a);
+}
+
+/** Evaluate a custom load expression safely */
+function evalCustomLoad(expr, x) {
+  try {
+    // eslint-disable-next-line no-new-func
+    return new Function('x', `"use strict"; try { return (${expr}); } catch(e){ return 0; }`)(x);
+  } catch {
+    return 0;
+  }
+}
+
+/** Cumulative shear for a custom load from x1 to x using N-point trapezoidal */
+function customShearAt(x, x1, x2, expr, N = 200) {
+  if (x <= x1) return 0;
+  const upper = Math.min(x, x2);
+  const n = Math.max(4, Math.round(N * (upper - x1) / (x2 - x1 || 1)));
+  const h = (upper - x1) / n;
+  let sum = (evalCustomLoad(expr, x1) + evalCustomLoad(expr, upper)) / 2;
+  for (let i = 1; i < n; i++) sum += evalCustomLoad(expr, x1 + i * h);
+  return sum * h;
+}
+
+function customMomentAbout(a, x1, x2, expr, N = 200) {
+  const n = N;
+  const h = (x2 - x1) / n;
+  let sum = 0;
+  for (let i = 0; i <= n; i++) {
+    const xi = x1 + i * h;
+    const w = (i === 0 || i === n) ? 0.5 : 1;
+    sum += w * evalCustomLoad(expr, xi) * (xi - a);
+  }
+  return sum * h;
+}
+
+// ---------------------------------------------------------------------------
+// Reaction solver
+// ---------------------------------------------------------------------------
+
+/**
+ * Solve reactions for a beam with 2 supports + optional internal hinge.
+ * hinge: { x } — position of internal hinge (moment release).
+ * With a hinge, we split the beam at xh and use ΣM=0 on the shorter segment.
+ */
+function solveReactions(supports, pointLoads, udls, triLoads, customLoads, moments, hinge) {
+  const sorted = [...supports].sort((a, b) => a.x - b.x);
+  const supA = sorted[0];
+  const supB = sorted[sorted.length - 1];
+  const a = supA.x;
+  const b = supB.x;
   const L = b - a;
+  if (L < 1e-10) throw new Error('Support span too small');
 
-  // Sum moments about 'a' to find reaction at 'b'
-  let sumMoment = 0;
-  for (const pl of pointLoads) {
-    sumMoment += pl.magnitude * (pl.x - a);
-  }
-  for (const udl of udls) {
-    const start = Math.max(udl.x1, a);
-    const end = Math.min(udl.x2, b);
-    if (end > start) {
-      const w = udl.magnitude;
-      const len = end - start;
-      const centroid = (start + end) / 2;
-      sumMoment += w * len * (centroid - a);
+  // Helper: net vertical load between positions left and right
+  const loadsBetween = (left, right) => {
+    let V = 0;
+    for (const pl of pointLoads) {
+      if (pl.x > left && pl.x <= right) V += pl.magnitude;
     }
-  }
-  for (const m of moments) {
-    sumMoment += m.magnitude;
-  }
+    for (const u of udls) {
+      const s = Math.max(u.x1, left), e = Math.min(u.x2, right);
+      if (e > s) V += u.magnitude * (e - s);
+    }
+    for (const tl of triLoads) {
+      const s = Math.max(tl.x1, left), e = Math.min(tl.x2, right);
+      if (e > s) {
+        const t1 = (s - tl.x1) / (tl.x2 - tl.x1 || 1);
+        const t2 = (e - tl.x1) / (tl.x2 - tl.x1 || 1);
+        const w1e = tl.w1 + (tl.w2 - tl.w1) * t1;
+        const w2e = tl.w1 + (tl.w2 - tl.w1) * t2;
+        V += (w1e + w2e) / 2 * (e - s);
+      }
+    }
+    for (const cl of customLoads) {
+      const s = Math.max(cl.x1, left), e = Math.min(cl.x2, right);
+      if (e > s) V += customShearAt(e, s, e, cl.expr);
+    }
+    return V;
+  };
 
-  const Rb = -sumMoment / L;
-  const Ra = -pointLoads.reduce((acc, pl) => acc + pl.magnitude, 0)
-    - udls.reduce((acc, udl) => {
-        const start = Math.max(udl.x1, a);
-        const end = Math.min(udl.x2, b);
-        return end > start ? acc + udl.magnitude * (end - start) : acc;
-      }, 0) - Rb;
+  // Moment about point 'pivot' of all loads
+  const momentAbout = (pivot) => {
+    let M = 0;
+    for (const pl of pointLoads) M += pl.magnitude * (pl.x - pivot);
+    for (const u of udls) {
+      const s = Math.max(u.x1, a), e = Math.min(u.x2, b);
+      if (e > s) {
+        const len = e - s;
+        M += u.magnitude * len * ((s + e) / 2 - pivot);
+      }
+    }
+    for (const tl of triLoads) M += triMomentAbout(pivot, tl.x1, tl.x2, tl.w1, tl.w2);
+    for (const cl of customLoads) M += customMomentAbout(pivot, cl.x1, cl.x2, cl.expr);
+    for (const m of moments) M += m.magnitude;
+    return M;
+  };
+
+  let Ra, Rb;
+
+  if (hinge) {
+    const xh = hinge.x;
+    // Moment of all loads on [xh, b] about xh = Rb*(b-xh)  →  Rb = that moment / (b-xh)
+    const momentRightAboutHinge = (() => {
+      let M = 0;
+      for (const pl of pointLoads) {
+        if (pl.x > xh && pl.x <= b) M += pl.magnitude * (pl.x - xh);
+      }
+      for (const u of udls) {
+        const s = Math.max(u.x1, xh), e = Math.min(u.x2, b);
+        if (e > s) M += u.magnitude * (e - s) * ((s + e) / 2 - xh);
+      }
+      for (const tl of triLoads) {
+        const s = Math.max(tl.x1, xh), e = Math.min(tl.x2, b);
+        if (e > s) M += triMomentAbout(xh, s, e, tl.w1, tl.w2);
+      }
+      for (const cl of customLoads) {
+        const s = Math.max(cl.x1, xh), e = Math.min(cl.x2, b);
+        if (e > s) M += customMomentAbout(xh, s, e, cl.expr);
+      }
+      // Applied moments on right segment
+      for (const m of moments) {
+        if (m.x > xh) M += m.magnitude;
+      }
+      return M;
+    })();
+    Rb = -momentRightAboutHinge / (b - xh);
+    // Global ΣFy = 0
+    const totalLoad = loadsBetween(-Infinity, Infinity);
+    Ra = -totalLoad - Rb;
+  } else {
+    Rb = -momentAbout(a) / L;
+    const totalLoad = loadsBetween(-Infinity, Infinity);
+    Ra = -totalLoad - Rb;
+  }
 
   return [
-    { id: pin.id, x: a, reaction: Ra },
-    { id: roller.id, x: b, reaction: Rb },
+    { id: supA.id, x: a, reaction: Ra },
+    { id: supB.id, x: b, reaction: Rb },
   ];
 }
 
-/** Build shear, moment, and deflection arrays across the span */
+// ---------------------------------------------------------------------------
+// Main solver
+// ---------------------------------------------------------------------------
+
 export function solveBeam(beam) {
-  const { span, E, I, supports, pointLoads, udls, moments } = beam;
+  const {
+    span, E, I, supports,
+    pointLoads = [], udls = [], triangularLoads = [],
+    customLoads = [], moments = [], hinges = [],
+  } = beam;
   if (!supports || supports.length < 2) return null;
 
-  // Sort supports by x
-  const sortedSupports = [...supports].sort((a, b) => a.x - b.x);
+  const hinge = hinges.length > 0 ? hinges[0] : null;
 
   let reactions;
   try {
-    reactions = solveDeterminate(span, sortedSupports, pointLoads, udls, moments);
+    reactions = solveReactions(supports, pointLoads, udls, triangularLoads, customLoads, moments, hinge);
   } catch {
     return null;
   }
@@ -71,74 +197,56 @@ export function solveBeam(beam) {
   const shear = new Array(N + 1).fill(0);
   const moment = new Array(N + 1).fill(0);
 
-  // Build shear by integrating loads from left
   for (let i = 0; i <= N; i++) {
     const x = xArr[i];
     let V = 0;
 
-    // Reactions
-    for (const r of reactions) {
-      if (x >= r.x) V += r.reaction;
+    for (const r of reactions) if (x >= r.x) V += r.reaction;
+    for (const pl of pointLoads) if (x > pl.x) V += pl.magnitude;
+    for (const u of udls) {
+      const covered = Math.min(x, u.x2) - Math.min(x, u.x1);
+      if (covered > 0) V += u.magnitude * covered;
     }
-    // Point loads
-    for (const pl of pointLoads) {
-      if (x > pl.x) V += pl.magnitude;
-    }
-    // UDLs
-    for (const udl of udls) {
-      const covered = Math.min(x, udl.x2) - Math.min(x, udl.x1);
-      if (covered > 0) V += udl.magnitude * covered;
-    }
+    for (const tl of triangularLoads) V += triShearAt(x, tl.x1, tl.x2, tl.w1, tl.w2);
+    for (const cl of customLoads) V += customShearAt(x, cl.x1, cl.x2, cl.expr);
 
     shear[i] = V;
   }
 
-  // Integrate shear to get moment
   for (let i = 1; i <= N; i++) {
     moment[i] = moment[i - 1] + 0.5 * (shear[i - 1] + shear[i]) * dx;
-    // Applied moments
     for (const m of moments) {
-      if (xArr[i - 1] < m.x && m.x <= xArr[i]) {
-        moment[i] += m.magnitude;
-      }
+      if (xArr[i - 1] < m.x && m.x <= xArr[i]) moment[i] += m.magnitude;
+    }
+    // Enforce hinge: M = 0 just after hinge position
+    if (hinge && xArr[i - 1] < hinge.x && hinge.x <= xArr[i]) {
+      moment[i] = 0;
     }
   }
 
-  // Deflection via double integration (EI * y'' = M)
-  // Using trapezoidal rule twice
   const EI = E * I;
   const slope = new Array(N + 1).fill(0);
   const deflection = new Array(N + 1).fill(0);
 
-  // Integrate moment to get EI * slope
   for (let i = 1; i <= N; i++) {
     slope[i] = slope[i - 1] + 0.5 * (moment[i - 1] + moment[i]) * dx;
   }
 
-  // Apply boundary condition: deflection = 0 at supports
+  const sortedSupports = [...supports].sort((a, b) => a.x - b.x);
   const leftX = sortedSupports[0].x;
   const rightX = sortedSupports[sortedSupports.length - 1].x;
   const iLeft = Math.round(leftX / dx);
   const iRight = Math.round(rightX / dx);
 
-  // Integrate slope to get EI * deflection
   for (let i = 1; i <= N; i++) {
     deflection[i] = deflection[i - 1] + 0.5 * (slope[i - 1] + slope[i]) * dx;
   }
-
-  // Correct for slope constant using y(left)=0, y(right)=0
   const C1 = -deflection[iLeft];
-  for (let i = 0; i <= N; i++) {
-    deflection[i] += C1;
-  }
-  const slopeCorrection = -deflection[iRight] / (rightX - leftX);
-  for (let i = 0; i <= N; i++) {
-    deflection[i] += slopeCorrection * (xArr[i] - leftX);
-  }
+  for (let i = 0; i <= N; i++) deflection[i] += C1;
+  const slopeCorrection = -deflection[iRight] / (rightX - leftX || 1);
+  for (let i = 0; i <= N; i++) deflection[i] += slopeCorrection * (xArr[i] - leftX);
 
-  // Divide by EI
   const deflArr = deflection.map((d) => d / EI);
-  const slopeArr = slope.map((s) => s / EI);
 
   const data = xArr.map((x, i) => ({
     x: +x.toFixed(4),
@@ -147,51 +255,66 @@ export function solveBeam(beam) {
     deflection: +deflArr[i].toFixed(8),
   }));
 
-  const maxShear = Math.max(...shear.map(Math.abs));
-  const maxMoment = Math.max(...moment.map(Math.abs));
-  const maxDeflection = Math.max(...deflArr.map(Math.abs));
-
-  return { reactions, data, maxShear, maxMoment, maxDeflection };
+  return {
+    reactions,
+    data,
+    maxShear: Math.max(...shear.map(Math.abs)),
+    maxMoment: Math.max(...moment.map(Math.abs)),
+    maxDeflection: Math.max(...deflArr.map(Math.abs)),
+  };
 }
 
-/** Compute ILD for shear and moment at a given point x0 */
-export function computeILD(beam, x0) {
-  const { span, supports } = beam;
+// ---------------------------------------------------------------------------
+// ILD solver — supports internal hinge
+// ---------------------------------------------------------------------------
+
+export function computeILD(beam, x0, ildType = 'shear') {
+  const {
+    span, supports,
+    udls = [], triangularLoads = [], customLoads = [], moments = [],
+    hinges = [],
+  } = beam;
+
   const sortedSupports = [...supports].sort((a, b) => a.x - b.x);
   const a = sortedSupports[0].x;
   const b = sortedSupports[sortedSupports.length - 1].x;
   const L = b - a;
+  const hinge = hinges.length > 0 ? hinges[0] : null;
 
-  const N = 200;
+  const N = 300;
   const dx = span / N;
-
-  const shearILD = [];
-  const momentILD = [];
+  const result = [];
 
   for (let i = 0; i <= N; i++) {
-    const unitPos = i * dx; // position of unit load
+    const p = i * dx; // unit load position
 
-    // Reaction at b due to unit load at unitPos
-    const Rb = -(unitPos - a) / L;
-    const Ra = -1 - Rb;
+    let Ra, Rb;
 
-    // Shear at x0
-    let V = 0;
-    if (unitPos <= x0) {
-      V = -Ra; // unit load left of x0
+    if (hinge) {
+      const xh = hinge.x;
+      // Moment of unit load on right segment about hinge
+      const unitOnRight = p > xh && p <= b ? -(p - xh) : 0;
+      Rb = -unitOnRight / (b - xh);
+      Ra = -1 - Rb;
     } else {
-      V = Rb; // unit load right of x0 — contribution from right reaction
+      Rb = -(p - a) / L;
+      Ra = -1 - Rb;
     }
-    // More precise: shear at x0 from left
-    let Vx = Ra;
-    if (unitPos < x0) Vx += -1; // unit load between a and x0
 
-    let Mx = Ra * (x0 - a);
-    if (unitPos < x0) Mx += -(x0 - unitPos);
+    // Value at x0 from left
+    let val;
+    if (ildType === 'shear') {
+      let V = Ra;
+      if (p < x0) V += -1;
+      val = V;
+    } else {
+      let M = Ra * (x0 - a);
+      if (p < x0) M += -(x0 - p);
+      val = M;
+    }
 
-    shearILD.push({ x: +unitPos.toFixed(4), value: +Vx.toFixed(6) });
-    momentILD.push({ x: +unitPos.toFixed(4), value: +Mx.toFixed(6) });
+    result.push({ x: +p.toFixed(4), value: +val.toFixed(6) });
   }
 
-  return { shearILD, momentILD };
+  return result;
 }
