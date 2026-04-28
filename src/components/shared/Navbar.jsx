@@ -4,6 +4,7 @@ const tabs = [
   { id: 'beam', label: 'Beam Analyzer', icon: '━' },
   { id: 'truss', label: 'Truss Generator', icon: '△' },
   { id: 'summary', label: 'Summary', icon: '⊞' },
+  { id: 'section3d', label: '3D Visualiser', icon: '◫' },
 ];
 
 export default function Navbar() {
