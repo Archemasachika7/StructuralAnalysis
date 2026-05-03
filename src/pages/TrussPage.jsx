@@ -71,7 +71,8 @@ export default function TrussPage() {
         )}
 
         {view === '3d' && truss.nodes.length > 0
-          ? <Truss3DVisualizer nodes={truss.nodes} members={truss.members} loads={truss.loads} results={results} />
+          ? <Truss3DVisualizer nodes={truss.nodes} members={truss.members} loads={truss.loads} results={results}
+              pinNodeId={truss.pinNodeId} rollerNodeId={truss.rollerNodeId} />
           : <TrussVisualizer
               nodes={truss.nodes}
               members={truss.members}

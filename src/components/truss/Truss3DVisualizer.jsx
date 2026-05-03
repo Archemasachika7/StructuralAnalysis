@@ -1,269 +1,361 @@
-import { useMemo, useState } from 'react';
-import { Canvas } from '@react-three/fiber';
-import { OrbitControls, Line, Html, GizmoHelper, GizmoViewport } from '@react-three/drei';
+import { useMemo, useState, useRef } from 'react';
+import { Canvas, useThree } from '@react-three/fiber';
+import { OrbitControls, Line, Html } from '@react-three/drei';
 import * as THREE from 'three';
 
-function tensionColor(force, maxForce) {
+// ─── ui helpers ───────────────────────────────────────────────────────────────
+
+function Slider({ label, value, min, max, step, onChange }) {
+  return (
+    <label className="flex flex-col gap-0.5 text-xs text-slate-400">
+      <div className="flex justify-between">
+        <span>{label}</span>
+        <span className="text-slate-300 font-mono">{typeof value === 'number' ? value.toFixed(step < 0.1 ? 2 : 1) : value}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="accent-emerald-500 w-full" />
+    </label>
+  );
+}
+
+function Toggle({ label, checked, onChange }) {
+  return (
+    <label className="flex items-center justify-between text-xs text-slate-400 cursor-pointer select-none">
+      {label}
+      <div onClick={() => onChange(!checked)}
+        className={`w-8 h-4 rounded-full transition-colors relative ${checked ? 'bg-emerald-600' : 'bg-slate-600'}`}>
+        <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${checked ? 'left-4' : 'left-0.5'}`} />
+      </div>
+    </label>
+  );
+}
+
+const BG_COLORS = { dark: '#0f172a', navy: '#0c1a2e', slate: '#1a1f2e' };
+
+// ─── colour mapping ───────────────────────────────────────────────────────────
+
+function forceToColor(force, maxForce) {
   if (Math.abs(force) < 0.5) return new THREE.Color('#475569');
   const t = Math.min(Math.abs(force) / (maxForce || 1), 1);
-  if (force > 0) return new THREE.Color(0.1 + 0.1 * t, 0.4 + 0.5 * t, 0.8 + 0.2 * t);
-  return new THREE.Color(0.8 + 0.2 * t, 0.1, 0.1);
+  if (force > 0) return new THREE.Color(0.1 + 0.08 * t, 0.38 + 0.52 * t, 0.8 + 0.2 * t);
+  return new THREE.Color(0.78 + 0.22 * t, 0.08 + 0.02 * (1 - t), 0.08);
 }
 
 function fmtF(v) {
-  const a = Math.abs(v);
-  const s = v > 0 ? 'T' : 'C';
-  if (a >= 1e6) return `${(a/1e6).toFixed(2)}MN (${s})`;
-  if (a >= 1e3) return `${(a/1e3).toFixed(2)}kN (${s})`;
-  return `${a.toFixed(0)}N (${s})`;
+  const a = Math.abs(v), s = v > 0 ? 'T' : 'C';
+  if (a >= 1e6) return `${(a / 1e6).toFixed(2)} MN (${s})`;
+  if (a >= 1e3) return `${(a / 1e3).toFixed(2)} kN (${s})`;
+  return `${a.toFixed(0)} N (${s})`;
 }
 
-function Member({ ni, nj, force, maxForce, isHovered, onHover, onLeave, deflected, dispScale }) {
-  const [p1, p2] = useMemo(() => {
-    if (deflected) {
-      return [
-        [ni.x + (ni.ux || 0) * dispScale, ni.y + (ni.uy || 0) * dispScale, 0],
-        [nj.x + (nj.ux || 0) * dispScale, nj.y + (nj.uy || 0) * dispScale, 0],
-      ];
-    }
-    return [[ni.x, ni.y, 0], [nj.x, nj.y, 0]];
-  }, [ni, nj, deflected, dispScale]);
+// ─── hit-box member (invisible cylinder for hover detection) ──────────────────
 
-  const color = tensionColor(force, maxForce);
-  const width = isHovered ? 5 : 3;
+function MemberHitBox({ p1, p2, onOver, onOut }) {
+  const mid = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2, (p1[2] + p2[2]) / 2];
+  const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+  const len = Math.sqrt(dx * dx + dy * dy);
+  const angle = Math.atan2(dy, dx);
 
   return (
-    <group
-      onPointerOver={(e) => { e.stopPropagation(); onHover(); }}
-      onPointerOut={onLeave}
+    <mesh
+      position={mid}
+      rotation={[0, 0, angle]}
+      onPointerOver={(e) => { e.stopPropagation(); onOver(); }}
+      onPointerOut={onOut}
     >
-      <Line points={[p1, p2]} color={color} lineWidth={width} />
-      {isHovered && (
-        <Html position={[(p1[0]+p2[0])/2, (p1[1]+p2[1])/2+0.25, 0]} center style={{ pointerEvents: 'none' }}>
+      <boxGeometry args={[len, 0.18, 0.18]} />
+      <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+    </mesh>
+  );
+}
+
+// ─── single member ────────────────────────────────────────────────────────────
+
+function Member({ ni, nj, force, maxForce, lineWidth, hovered, onOver, onOut }) {
+  const color = forceToColor(force, maxForce);
+  const p1 = [ni.x, ni.y, 0], p2 = [nj.x, nj.y, 0];
+  const mid = [(ni.x + nj.x) / 2, (ni.y + nj.y) / 2 + 0.22, 0];
+
+  return (
+    <>
+      <Line points={[p1, p2]} color={color} lineWidth={hovered ? lineWidth + 2 : lineWidth} />
+      <MemberHitBox p1={p1} p2={p2} onOver={onOver} onOut={onOut} />
+      {hovered && (
+        <Html position={mid} center style={{ pointerEvents: 'none' }}>
           <div style={{
-            background: '#1e293b', border: '1px solid #475569', borderRadius: 4,
-            padding: '3px 8px', fontSize: 11, color: '#f1f5f9', whiteSpace: 'nowrap',
+            background: '#1e293b', border: '1px solid #334155', borderRadius: 5,
+            padding: '4px 10px', fontSize: 11, color: '#f1f5f9',
+            whiteSpace: 'nowrap', boxShadow: '0 2px 8px #000a',
           }}>
             {fmtF(force)}
           </div>
         </Html>
       )}
-    </group>
+    </>
   );
 }
 
-function NodeSphere({ node, isPin, isRoller, disp, dispScale, showDisp }) {
-  const pos = showDisp
-    ? [node.x + (disp?.ux || 0) * dispScale, node.y + (disp?.uy || 0) * dispScale, 0]
-    : [node.x, node.y, 0];
+// ─── deflected member overlay ─────────────────────────────────────────────────
 
-  const color = isPin ? '#3b82f6' : isRoller ? '#10b981' : '#94a3b8';
-  const r = 0.12;
+function DeflectedMember({ ni, nj, diA, diB, dispScale }) {
+  const p1 = [ni.x + diA.ux * dispScale, ni.y + diA.uy * dispScale, 0];
+  const p2 = [nj.x + diB.ux * dispScale, nj.y + diB.uy * dispScale, 0];
+  return <Line points={[p1, p2]} color="#c084fc" lineWidth={2} />;
+}
+
+// ─── node sphere ─────────────────────────────────────────────────────────────
+
+function NodeSphere({ node, isPin, isRoller, nodeRadius, disp, dispScale, showDefl, showLabels }) {
+  const pos = showDefl && disp
+    ? [node.x + disp.ux * dispScale, node.y + disp.uy * dispScale, 0]
+    : [node.x, node.y, 0];
+  const r = nodeRadius;
+  const color = isPin ? '#3b82f6' : isRoller ? '#10b981' : '#64748b';
 
   return (
     <group position={pos}>
       <mesh>
-        <sphereGeometry args={[r, 10, 10]} />
+        <sphereGeometry args={[r, 12, 12]} />
         <meshStandardMaterial color={color} metalness={0.5} roughness={0.3} />
       </mesh>
-      {/* Support symbols */}
       {isPin && (
-        <mesh position={[0, -r - 0.28, 0]} rotation={[Math.PI, 0, 0]}>
-          <coneGeometry args={[0.22, 0.5, 4]} />
-          <meshStandardMaterial color="#3b82f6" metalness={0.4} />
-        </mesh>
+        <group position={[0, -r, 0]}>
+          <mesh rotation={[Math.PI, 0, 0]}>
+            <coneGeometry args={[r * 1.6, r * 3.5, 4]} />
+            <meshStandardMaterial color="#2563eb" metalness={0.35} />
+          </mesh>
+          <mesh position={[0, -r * 2.2, 0]}>
+            <boxGeometry args={[r * 4, r * 0.3, r * 3]} />
+            <meshStandardMaterial color="#1d4ed8" />
+          </mesh>
+        </group>
       )}
       {isRoller && (
-        <group position={[0, -r - 0.22, 0]} rotation={[Math.PI, 0, 0]}>
-          <mesh>
-            <coneGeometry args={[0.2, 0.4, 4]} />
-            <meshStandardMaterial color="#10b981" metalness={0.4} />
+        <group position={[0, -r, 0]}>
+          <mesh rotation={[Math.PI, 0, 0]}>
+            <coneGeometry args={[r * 1.5, r * 3, 4]} />
+            <meshStandardMaterial color="#059669" />
           </mesh>
-          {[-0.12, 0.12].map((dz, i) => (
-            <mesh key={i} position={[0, -0.3, dz]} rotation={[Math.PI / 2, 0, 0]}>
-              <cylinderGeometry args={[0.06, 0.06, 0.22, 10]} />
+          {[-r * 0.9, r * 0.9].map((dz, i) => (
+            <mesh key={i} position={[0, -r * 2.2, dz]} rotation={[Math.PI / 2, 0, 0]}>
+              <cylinderGeometry args={[r * 0.5, r * 0.5, r * 1.5, 12]} />
               <meshStandardMaterial color="#065f46" />
             </mesh>
           ))}
         </group>
       )}
+      {showLabels && (
+        <Html position={[0, r + 0.18, 0]} center style={{ pointerEvents: 'none' }}>
+          <div style={{ fontSize: 9, color: '#94a3b8', textShadow: '0 0 4px #000' }}>N{node.id}</div>
+        </Html>
+      )}
     </group>
   );
 }
 
-function LoadArrow3D({ node, fx, fy }) {
-  const elements = [];
-  const len = 0.75;
+// ─── load arrows ─────────────────────────────────────────────────────────────
+
+function LoadArrow3D({ node, fx, fy, arrowScale, showLabels }) {
+  const len = arrowScale;
+  const shaft = len * 0.68, head = len * 0.32;
+  const elems = [];
 
   if (fy) {
-    const isDown = fy < 0;
-    const color = '#f87171';
-    const dir = isDown ? -1 : 1;
-    elements.push(
-      <group key="fy" position={[node.x, node.y + (isDown ? len : -len), 0]}>
-        <mesh position={[0, (-dir * len * 0.65) / 2, 0]}>
-          <cylinderGeometry args={[0.03, 0.03, len * 0.65, 8]} />
+    const isDown = fy < 0, dir = isDown ? -1 : 1, color = '#f87171';
+    const startY = node.y + dir * len;
+    elems.push(
+      <group key="fy">
+        <mesh position={[node.x, startY - dir * shaft * 0.5, 0]}>
+          <cylinderGeometry args={[0.04, 0.04, shaft, 8]} />
           <meshStandardMaterial color={color} />
         </mesh>
-        <mesh position={[0, -dir * len * 0.82, 0]} rotation={[isDown ? 0 : Math.PI, 0, 0]}>
-          <coneGeometry args={[0.1, len * 0.25, 8]} />
+        <mesh position={[node.x, startY - dir * (shaft + head * 0.5), 0]} rotation={[isDown ? 0 : Math.PI, 0, 0]}>
+          <coneGeometry args={[0.12, head, 8]} />
           <meshStandardMaterial color={color} />
         </mesh>
-        <Html position={[0, 0.1, 0]} center style={{ pointerEvents: 'none' }}>
-          <div style={{ fontSize: 10, color, whiteSpace: 'nowrap', textShadow: '0 0 4px #000' }}>
-            {(Math.abs(fy) / 1000).toFixed(1)}kN
-          </div>
-        </Html>
+        {showLabels && (
+          <Html position={[node.x, startY + dir * 0.18, 0]} center style={{ pointerEvents: 'none' }}>
+            <div style={{ fontSize: 11, color, whiteSpace: 'nowrap', textShadow: '0 0 5px #000', fontWeight: 600 }}>
+              {(Math.abs(fy) / 1000).toFixed(1)} kN
+            </div>
+          </Html>
+        )}
       </group>
     );
   }
 
   if (fx) {
-    const isRight = fx > 0;
-    const color = '#fb923c';
-    const dir = isRight ? -1 : 1;
-    elements.push(
-      <group key="fx" position={[node.x + (isRight ? len : -len), node.y, 0]}>
-        <mesh position={[(-dir * len * 0.65) / 2, 0, 0]} rotation={[0, 0, Math.PI / 2]}>
-          <cylinderGeometry args={[0.03, 0.03, len * 0.65, 8]} />
+    const isRight = fx > 0, dir = isRight ? 1 : -1, color = '#fb923c';
+    const startX = node.x + dir * len;
+    elems.push(
+      <group key="fx">
+        <mesh position={[startX - dir * shaft * 0.5, node.y, 0]} rotation={[0, 0, Math.PI / 2]}>
+          <cylinderGeometry args={[0.04, 0.04, shaft, 8]} />
           <meshStandardMaterial color={color} />
         </mesh>
-        <mesh position={[-dir * len * 0.82, 0, 0]} rotation={[0, 0, isRight ? Math.PI / 2 : -Math.PI / 2]}>
-          <coneGeometry args={[0.1, len * 0.25, 8]} />
+        <mesh position={[startX - dir * (shaft + head * 0.5), node.y, 0]} rotation={[0, 0, isRight ? -Math.PI / 2 : Math.PI / 2]}>
+          <coneGeometry args={[0.12, head, 8]} />
           <meshStandardMaterial color={color} />
         </mesh>
       </group>
     );
   }
 
-  return <>{elements}</>;
+  return <>{elems}</>;
 }
 
-function Scene({ nodes, members, loads, results, showDeflected, dispScale }) {
+// ─── camera reset helper ─────────────────────────────────────────────────────
+
+function CameraReset({ target, distance, triggerReset }) {
+  const { camera } = useThree();
+  const orbitRef = useRef();
+  useMemo(() => {
+    if (!triggerReset) return;
+    camera.position.set(target[0], target[1] + distance * 0.5, distance);
+    camera.lookAt(...target);
+  }, [triggerReset]);
+  return null;
+}
+
+// ─── scene ────────────────────────────────────────────────────────────────────
+
+function Scene({ nodes, members, loads, results, ctrl, resetTrigger }) {
   const [hoveredId, setHoveredId] = useState(null);
 
-  if (!nodes.length) return null;
+  const nodeMap = useMemo(() => {
+    const m = {};
+    nodes.forEach((n) => { m[n.id] = n; });
+    return m;
+  }, [nodes]);
+
+  const dispMap = useMemo(() => {
+    const m = {};
+    (results?.nodeDisplacements || []).forEach((d) => { m[d.nodeId] = d; });
+    return m;
+  }, [results]);
+
+  const mfArr = results?.memberForces || [];
+  const maxForce = mfArr.length ? Math.max(...mfArr.map((m) => Math.abs(m.force))) : 1;
 
   const xs = nodes.map((n) => n.x);
   const ys = nodes.map((n) => n.y);
-  const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-  const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-
-  const nodeMap = {};
-  nodes.forEach((n) => { nodeMap[n.id] = n; });
+  const span = xs.length ? Math.max(...xs) - Math.min(...xs) : 10;
+  const cx = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 0;
+  const cy = ys.length ? (Math.min(...ys) + Math.max(...ys)) / 2 : 0;
 
   const sortedByX = [...nodes].sort((a, b) => a.x - b.x);
-  const pinNode = sortedByX[0];
-  const rollerNode = sortedByX[sortedByX.length - 1];
+  const pinNode = ctrl.pinNodeId != null
+    ? nodes.find((n) => n.id === ctrl.pinNodeId) || sortedByX[0]
+    : sortedByX[0];
+  const rollerNode = ctrl.rollerNodeId != null
+    ? nodes.find((n) => n.id === ctrl.rollerNodeId) || sortedByX[sortedByX.length - 1]
+    : sortedByX[sortedByX.length - 1];
 
-  const memberForces = results?.memberForces || [];
-  const nodeDisp = results?.nodeDisplacements || [];
-  const dispMap = {};
-  nodeDisp.forEach((d) => { dispMap[d.nodeId] = d; });
-
-  const maxForce = memberForces.length ? Math.max(...memberForces.map((m) => Math.abs(m.force))) : 1;
-
-  const span = Math.max(...xs) - Math.min(...xs);
-  const height = Math.max(...ys) - Math.min(...ys) || 1;
+  const autoDispScale = useMemo(() => {
+    if (!results?.nodeDisplacements?.length) return 1;
+    const maxU = Math.max(...results.nodeDisplacements.map((d) => Math.max(Math.abs(d.ux), Math.abs(d.uy))));
+    return maxU > 1e-10 ? (span * 0.07) / maxU : 1;
+  }, [results, span]);
+  const dispScale = ctrl.autoDeflScale ? autoDispScale : ctrl.deflScale;
 
   return (
     <>
-      <ambientLight intensity={0.55} />
-      <directionalLight position={[cx + span * 0.5, height * 3, span * 0.5]} intensity={1.3} castShadow />
-      <directionalLight position={[cx - span * 0.3, height * 2, -span * 0.3]} intensity={0.4} />
+      <ambientLight intensity={0.5} />
+      <directionalLight position={[cx + span * 0.5, span * 1.2, span * 0.6]} intensity={1.3} castShadow />
+      <directionalLight position={[cx - span * 0.3, span * 0.5, -span * 0.4]} intensity={0.4} />
 
-      {/* Members */}
+      {/* original members */}
       {members.map((m) => {
-        const ni = nodeMap[m.nodeA];
-        const nj = nodeMap[m.nodeB];
+        const ni = nodeMap[m.nodeA], nj = nodeMap[m.nodeB];
         if (!ni || !nj) return null;
-        const mf = memberForces.find((f) => f.id === m.id);
-        const niDisp = dispMap[m.nodeA];
-        const njDisp = dispMap[m.nodeB];
-        const niD = { ...ni, ux: niDisp?.ux || 0, uy: niDisp?.uy || 0 };
-        const njD = { ...nj, ux: njDisp?.ux || 0, uy: njDisp?.uy || 0 };
+        const mf = mfArr.find((f) => f.id === m.id);
         return (
           <Member
             key={m.id}
-            ni={niD} nj={njD}
-            force={mf?.force || 0}
+            ni={ni} nj={nj}
+            force={mf?.force ?? 0}
             maxForce={maxForce}
-            isHovered={hoveredId === m.id}
-            onHover={() => setHoveredId(m.id)}
-            onLeave={() => setHoveredId(null)}
-            deflected={showDeflected && !!results}
-            dispScale={dispScale}
+            lineWidth={ctrl.memberSize * 2.5}
+            hovered={hoveredId === m.id}
+            onOver={() => setHoveredId(m.id)}
+            onOut={() => setHoveredId(null)}
           />
         );
       })}
 
-      {/* Nodes */}
+      {/* deflected overlay */}
+      {ctrl.showDeflected && results && members.map((m) => {
+        const ni = nodeMap[m.nodeA], nj = nodeMap[m.nodeB];
+        const diA = dispMap[m.nodeA], diB = dispMap[m.nodeB];
+        if (!ni || !nj || !diA || !diB) return null;
+        return <DeflectedMember key={`d-${m.id}`} ni={ni} nj={nj} diA={diA} diB={diB} dispScale={dispScale} />;
+      })}
+
+      {/* nodes */}
       {nodes.map((n) => (
         <NodeSphere
-          key={n.id}
-          node={n}
-          isPin={n.id === pinNode.id}
-          isRoller={n.id === rollerNode.id}
+          key={n.id} node={n}
+          isPin={n.id === pinNode?.id}
+          isRoller={n.id === rollerNode?.id}
+          nodeRadius={ctrl.nodeSize * 0.12}
           disp={dispMap[n.id]}
           dispScale={dispScale}
-          showDisp={showDeflected && !!results}
+          showDefl={ctrl.showDeflected && !!results}
+          showLabels={ctrl.showLabels}
         />
       ))}
 
-      {/* Loads */}
+      {/* loads */}
       {loads.map((l) => {
         const n = nodeMap[l.nodeId];
         if (!n) return null;
-        return <LoadArrow3D key={l.id} node={n} fx={l.fx} fy={l.fy} />;
+        return <LoadArrow3D key={l.id} node={n} fx={l.fx} fy={l.fy} arrowScale={ctrl.arrowScale} showLabels={ctrl.showLabels} />;
       })}
 
-      {/* Deflected shape overlay (ghost) */}
-      {showDeflected && results && members.map((m) => {
-        const ni = nodeMap[m.nodeA], nj = nodeMap[m.nodeB];
-        if (!ni || !nj) return null;
-        const diA = dispMap[m.nodeA], diB = dispMap[m.nodeB];
-        if (!diA || !diB) return null;
-        return (
-          <Line
-            key={`def-${m.id}`}
-            points={[
-              [ni.x + diA.ux * dispScale, ni.y + diA.uy * dispScale, 0],
-              [nj.x + diB.ux * dispScale, nj.y + diB.uy * dispScale, 0],
-            ]}
-            color="#c084fc" lineWidth={2}
-          />
-        );
-      })}
+      {ctrl.showGrid && (
+        <gridHelper args={[Math.max(span * 2, 12), 24, '#1e293b', '#0f172a']} position={[cx, -0.6, 0]} />
+      )}
 
-      <gridHelper
-        args={[Math.max(span * 1.8, 10), 20, '#1e293b', '#0f172a']}
-        position={[cx, -0.5, 0]}
-        rotation={[0, 0, 0]}
-      />
-
-      <OrbitControls makeDefault enablePan enableZoom enableRotate />
-      <GizmoHelper alignment="bottom-right" margin={[60, 60]}>
-        <GizmoViewport axisColors={['#f87171', '#4ade80', '#60a5fa']} labelColor="white" />
-      </GizmoHelper>
+      <CameraReset target={[cx, cy, 0]} distance={span * 1.1} triggerReset={resetTrigger} />
+      <OrbitControls makeDefault target={[cx, cy * 0.5, 0]} enablePan enableZoom enableRotate />
     </>
   );
 }
 
-export default function Truss3DVisualizer({ nodes, members, loads, results }) {
-  const [showDeflected, setShowDeflected] = useState(false);
+// ─── main export ─────────────────────────────────────────────────────────────
 
-  const dispScale = useMemo(() => {
-    if (!results?.nodeDisplacements?.length) return 1;
-    const maxU = Math.max(...results.nodeDisplacements.map((d) => Math.max(Math.abs(d.ux), Math.abs(d.uy))));
-    const span = nodes.length ? Math.max(...nodes.map((n) => n.x)) - Math.min(...nodes.map((n) => n.x)) : 10;
-    return maxU > 1e-10 ? (span * 0.08) / maxU : 1;
-  }, [results, nodes]);
+export default function Truss3DVisualizer({ nodes, members, loads, results, pinNodeId, rollerNodeId }) {
+  const [open, setOpen] = useState(false);
+  const [resetTrigger, setResetTrigger] = useState(0);
+  const [ctrl, setCtrl] = useState({
+    memberSize: 1,
+    nodeSize: 1,
+    arrowScale: 0.75,
+    showLabels: true,
+    showGrid: true,
+    showDeflected: false,
+    autoDeflScale: true,
+    deflScale: 50,
+    bg: 'dark',
+    pinNodeId: null,
+    rollerNodeId: null,
+  });
+
+  // Sync support nodes from parent (generated truss sets defaults)
+  useMemo(() => {
+    if (pinNodeId != null || rollerNodeId != null) {
+      setCtrl((c) => ({ ...c, pinNodeId, rollerNodeId }));
+    }
+  }, [pinNodeId, rollerNodeId]);
+
+  const upd = (k, v) => setCtrl((c) => ({ ...c, [k]: v }));
 
   const xs = nodes.map((n) => n.x);
   const ys = nodes.map((n) => n.y);
-  const cx = nodes.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 0;
-  const span = nodes.length ? Math.max(...xs) - Math.min(...xs) : 10;
-  const height = nodes.length ? Math.max(...ys) - Math.min(...ys) : 3;
+  const span = xs.length ? Math.max(...xs) - Math.min(...xs) : 10;
+  const h = ys.length ? Math.max(...ys) - Math.min(...ys) : 3;
+  const cx = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 0;
 
   if (!nodes.length) {
     return (
@@ -275,36 +367,82 @@ export default function Truss3DVisualizer({ nodes, members, loads, results }) {
 
   return (
     <div className="bg-slate-900 rounded-lg border border-slate-700 overflow-hidden">
-      <div className="px-3 py-2 border-b border-slate-700 text-xs text-slate-400 font-semibold flex items-center gap-4 flex-wrap">
-        3D TRUSS VISUALIZER
-        <span className="text-slate-600 font-normal">Drag to rotate · Scroll to zoom</span>
-        {results && (
-          <button
-            onClick={() => setShowDeflected((v) => !v)}
-            className={`px-2 py-0.5 rounded text-xs border transition-colors ${showDeflected ? 'bg-purple-900 border-purple-500 text-purple-300' : 'bg-slate-800 border-slate-600 text-slate-400 hover:border-slate-500'}`}
-          >
-            {showDeflected ? '✓ Deflected shape' : 'Show deflected shape'}
+      <div className="px-3 py-2 border-b border-slate-700 flex items-center gap-3 flex-wrap text-xs">
+        <span className="font-semibold text-slate-400">3D TRUSS VISUALIZER</span>
+        <span className="text-slate-600">Drag · Scroll · Right-drag pan</span>
+        {/* legend */}
+        <div className="flex items-center gap-3 ml-2">
+          <span className="flex items-center gap-1 text-blue-400"><span className="inline-block w-4 h-1.5 rounded bg-blue-400"/>Tension</span>
+          <span className="flex items-center gap-1 text-red-400"><span className="inline-block w-4 h-1.5 rounded bg-red-400"/>Compression</span>
+          {results && <span className="flex items-center gap-1 text-purple-400"><span className="inline-block w-4 h-1.5 rounded bg-purple-400"/>Deflected</span>}
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <button onClick={() => setResetTrigger((v) => v + 1)}
+            className="px-2.5 py-1 rounded text-xs border bg-slate-800 border-slate-600 text-slate-400 hover:border-slate-500 transition-colors">
+            ⟳ Reset camera
           </button>
-        )}
-        <div className="flex items-center gap-3 ml-auto text-xs">
-          <span className="flex items-center gap-1"><span className="inline-block w-3 h-2 rounded-sm bg-blue-400" /> Tension</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-3 h-2 rounded-sm bg-red-500" /> Compression</span>
-          {results && <span className="flex items-center gap-1"><span className="inline-block w-3 h-2 rounded-sm bg-purple-400" /> Deflected</span>}
+          <button onClick={() => setOpen((v) => !v)}
+            className={`px-2.5 py-1 rounded text-xs border transition-colors ${open ? 'bg-slate-700 border-slate-500 text-slate-200' : 'bg-slate-800 border-slate-600 text-slate-400 hover:border-slate-500'}`}>
+            ⚙ Controls
+          </button>
         </div>
       </div>
+
+      {/* Controls panel */}
+      {open && (
+        <div className="bg-slate-800 border-b border-slate-700 px-4 py-3 grid grid-cols-2 gap-x-6 gap-y-3">
+          <Slider label="Member thickness" value={ctrl.memberSize} min={0.4} max={3} step={0.1} onChange={(v) => upd('memberSize', v)} />
+          <Slider label="Node size" value={ctrl.nodeSize} min={0.4} max={2.5} step={0.1} onChange={(v) => upd('nodeSize', v)} />
+          <Slider label="Arrow scale" value={ctrl.arrowScale} min={0.2} max={2} step={0.1} onChange={(v) => upd('arrowScale', v)} />
+          <Toggle label="Show labels" checked={ctrl.showLabels} onChange={(v) => upd('showLabels', v)} />
+          <Toggle label="Show grid" checked={ctrl.showGrid} onChange={(v) => upd('showGrid', v)} />
+          <Toggle label="Show deflected shape" checked={ctrl.showDeflected} onChange={(v) => upd('showDeflected', v)} />
+          <Toggle label="Auto deflection scale" checked={ctrl.autoDeflScale} onChange={(v) => upd('autoDeflScale', v)} />
+          {!ctrl.autoDeflScale && (
+            <Slider label="Defl. scale ×" value={ctrl.deflScale} min={1} max={500} step={5} onChange={(v) => upd('deflScale', v)} />
+          )}
+          {/* Override support nodes in 3D */}
+          {nodes.length > 0 && (
+            <>
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Pin node (3D)
+                <select value={ctrl.pinNodeId ?? ''} onChange={(e) => upd('pinNodeId', parseInt(e.target.value))}
+                  className="bg-slate-700 border border-slate-600 rounded px-2 py-1 text-slate-100 text-xs">
+                  {nodes.map((n) => <option key={n.id} value={n.id}>N{n.id} ({n.x.toFixed(1)},{n.y.toFixed(1)})</option>)}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                Roller node (3D)
+                <select value={ctrl.rollerNodeId ?? ''} onChange={(e) => upd('rollerNodeId', parseInt(e.target.value))}
+                  className="bg-slate-700 border border-slate-600 rounded px-2 py-1 text-slate-100 text-xs">
+                  {nodes.map((n) => <option key={n.id} value={n.id}>N{n.id} ({n.x.toFixed(1)},{n.y.toFixed(1)})</option>)}
+                </select>
+              </label>
+            </>
+          )}
+          <div className="flex flex-col gap-1 text-xs text-slate-400">
+            Background
+            <div className="flex gap-2">
+              {Object.entries(BG_COLORS).map(([k, v]) => (
+                <button key={k} onClick={() => upd('bg', k)}
+                  className={`w-7 h-5 rounded border transition-all ${ctrl.bg === k ? 'border-emerald-400 scale-110' : 'border-slate-600'}`}
+                  style={{ background: v }} title={k} />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ height: 380 }}>
         <Canvas
-          camera={{ position: [cx, height * 2.5, span * 1.1], fov: 45, up: [0, 1, 0] }}
+          camera={{ position: [cx, h * 2.2, span * 1.05], fov: 46, up: [0, 1, 0] }}
           gl={{ antialias: true }}
-          style={{ background: '#0f172a' }}
+          style={{ background: BG_COLORS[ctrl.bg] }}
         >
           <Scene
-            nodes={nodes}
-            members={members}
-            loads={loads}
-            results={results}
-            showDeflected={showDeflected}
-            dispScale={dispScale}
+            nodes={nodes} members={members} loads={loads} results={results}
+            ctrl={{ ...ctrl, pinNodeId: ctrl.pinNodeId ?? pinNodeId, rollerNodeId: ctrl.rollerNodeId ?? rollerNodeId }}
+            resetTrigger={resetTrigger}
           />
         </Canvas>
       </div>
