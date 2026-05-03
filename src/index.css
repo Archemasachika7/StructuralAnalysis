@@ -1,5 +1,145 @@
 @import "tailwindcss";
 
 * { box-sizing: border-box; }
-body { margin: 0; background: #0f172a; color: #e2e8f0; font-family: system-ui, sans-serif; }
+
+body {
+  margin: 0;
+  background: #020817;
+  color: #e2e8f0;
+  font-family: 'Inter', system-ui, sans-serif;
+  overflow-x: hidden;
+}
+
 #root { width: 100%; min-height: 100vh; }
+
+/* ── scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #0f172a; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+/* ── animations ── */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-20px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 8px rgba(59,130,246,0.25); }
+  50%       { box-shadow: 0 0 22px rgba(59,130,246,0.55); }
+}
+@keyframes pulseGlowGreen {
+  0%, 100% { box-shadow: 0 0 8px rgba(16,185,129,0.25); }
+  50%       { box-shadow: 0 0 22px rgba(16,185,129,0.55); }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position:  200% center; }
+}
+@keyframes spin-slow { to { transform: rotate(360deg); } }
+@keyframes countUp {
+  from { opacity: 0; transform: scale(0.8); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes borderFlow {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+@keyframes gridDrift {
+  0%   { transform: translateY(0); }
+  100% { transform: translateY(40px); }
+}
+
+/* ── utility classes ── */
+.animate-fade-in-up  { animation: fadeInUp 0.45s ease-out both; }
+.animate-fade-in     { animation: fadeIn 0.3s ease-out both; }
+.animate-slide-left  { animation: slideInLeft 0.4s ease-out both; }
+.animate-count-up    { animation: countUp 0.5s cubic-bezier(.34,1.56,.64,1) both; }
+
+.glass {
+  background: rgba(15,23,42,0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.glass-blue {
+  background: rgba(30,58,138,0.15);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(59,130,246,0.2);
+}
+.glass-emerald {
+  background: rgba(6,78,59,0.15);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(16,185,129,0.2);
+}
+
+.glow-blue   { animation: pulseGlow 3s ease-in-out infinite; }
+.glow-green  { animation: pulseGlowGreen 3s ease-in-out infinite; }
+
+.gradient-border {
+  position: relative;
+  border-radius: 10px;
+}
+.gradient-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(59,130,246,0.5), rgba(139,92,246,0.3), rgba(16,185,129,0.3));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.shimmer-text {
+  background: linear-gradient(90deg, #e2e8f0 0%, #60a5fa 40%, #a78bfa 60%, #e2e8f0 100%);
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 4s linear infinite;
+}
+
+.dot-grid {
+  background-image: radial-gradient(rgba(59,130,246,0.12) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* ── range input ── */
+input[type="range"] {
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: #1e293b;
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #3b82f6;
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(59,130,246,0.6);
+  transition: transform 0.15s;
+}
+input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+/* ── staggered animation delays ── */
+.delay-50  { animation-delay: 50ms; }
+.delay-100 { animation-delay: 100ms; }
+.delay-150 { animation-delay: 150ms; }
+.delay-200 { animation-delay: 200ms; }
+.delay-250 { animation-delay: 250ms; }
+.delay-300 { animation-delay: 300ms; }
+.delay-400 { animation-delay: 400ms; }
